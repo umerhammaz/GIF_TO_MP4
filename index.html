@@ -44,11 +44,11 @@
 <body>
 <main>
   <h1>GIF → MP4</h1>
-  <p class="sub">Instant hardware conversion. Zero server uploads. Paste (Ctrl+V) or Drop.</p>
+  <p class="sub">Instant GPU pipeline. Zero WASM downloads. Paste (Ctrl+V) or Drop.</p>
 
   <label id="drop">
     <b>Drop GIFs here or Paste (Ctrl+V)</b>
-    <span>Multi-file batch supported · Micro-payload engine</span>
+    <span>Total engine weight: ~23 KB · Infinite batching</span>
     <input id="file" type="file" accept="image/gif" multiple />
   </label>
 
@@ -64,11 +64,9 @@
   <p id="status">Ready. Drop GIFs or paste from clipboard.</p>
 </main>
 
-<!-- Lightweight Native Muxer (~15 KB) -->
-<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.4/build/mp4-muxer.min.js"></script>
-<!-- FFmpeg UMD wrappers (~20 KB JS, WASM binaries loaded strictly on fallback) -->
-<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<!-- Total combined engine weight: ~23 KB (Zero 31 MB WASM downloads) -->
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/omggif@1.0.10/omggif.min.js"></script>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -79,7 +77,6 @@ const btnDownloadAll = $('#btn-download-all'), btnClearAll = $('#btn-clear-all')
 const activeUrls = new Set();
 const completedItems = [];
 let queue = Promise.resolve();
-let ffmpegInstance = null;
 
 const kb = n => (n / 1024).toFixed(n > 1048576 ? 0 : 1) + ' KB';
 
@@ -96,31 +93,57 @@ function releaseUrl(url) {
   }
 }
 
-// Pre-flight Gatekeeper: Validates GIF binary & blocks pixel bombs
+function createWorkCanvas(w, h) {
+  return typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(w, h)
+    : Object.assign(document.createElement('canvas'), { width: w, height: h });
+}
+
+// Layer 1: Zero-Memory Binary Sieve (Pixel-bomb & sanity gatekeeper)
 async function validateGif(file) {
   if (file.size < 16) throw new Error('File too small to be a valid GIF.');
   const slice = await file.slice(0, 16).arrayBuffer();
   const bytes = new Uint8Array(slice);
   const sig = String.fromCharCode(...bytes.subarray(0, 6));
   if (sig !== 'GIF87a' && sig !== 'GIF89a') {
-    throw new Error(`Invalid format (${sig || 'unknown'}). Only GIF supported.`);
+    throw new Error(`Invalid signature (${sig || 'unknown'}). Only GIF files supported.`);
   }
   const width = bytes[6] | (bytes[7] << 8);
   const height = bytes[8] | (bytes[9] << 8);
   if (width === 0 || height === 0) throw new Error('Invalid dimensions (0x0).');
   if (width > 4096 || height > 4096) {
-    throw new Error(`Pixel-bomb protection: ${width}x${height} exceeds 4096px limit.`);
+    throw new Error(`Safety limit: ${width}×${height} exceeds 4096px ceiling.`);
   }
   return { width, height };
 }
 
-// Tier 1: Hardware-Accelerated WebCodecs Engine
-async function convertWebCodecs(file, onProgress) {
-  const buffer = await file.arrayBuffer();
+// Hardware profile selection for 720p, 1080p, 1440p, 4K
+async function negotiateH264Config(width, height) {
+  const profiles = [
+    'avc1.640033', // High 5.1 (4K / 60fps)
+    'avc1.4d002a', // Main 4.2 (1080p)
+    'avc1.4d0028', // Main 4.0
+    'avc1.420028', // Baseline 4.0
+    'avc1.42001f'  // Baseline 3.1
+  ];
+
+  const bitrate = Math.min(8_000_000, Math.max(1_000_000, Math.round(width * height * 4)));
+
+  for (const codec of profiles) {
+    const config = { codec, width, height, bitrate, framerate: 30 };
+    try {
+      const check = await VideoEncoder.isConfigSupported(config);
+      if (check && check.supported) return check.config || config;
+    } catch (_) {}
+  }
+  return { codec: 'avc1.4d002a', width, height, bitrate, framerate: 30 };
+}
+
+// Tier 1: Native WebCodecs Pipeline (Chromium / Safari)
+async function convertWebCodecs(buffer, onProgress) {
   const decoder = new ImageDecoder({ data: buffer, type: 'image/gif' });
   await decoder.tracks.ready;
-  const track = decoder.tracks.selectedTrack;
-  const frameCount = track.frameCount;
+  const frameCount = decoder.tracks.selectedTrack.frameCount;
   if (!frameCount || frameCount <= 0) throw new Error('No frames found in GIF');
 
   const probe = await decoder.decode({ frameIndex: 0 });
@@ -128,14 +151,13 @@ async function convertWebCodecs(file, onProgress) {
   const srcH = probe.image.displayHeight;
   probe.image.close();
 
-  // H.264 requires dimensions divisible by 2
   const width = srcW - (srcW % 2);
   const height = srcH - (srcH % 2);
   const needsScale = (width !== srcW || height !== srcH);
 
   let canvas = null, ctx = null;
   if (needsScale) {
-    canvas = new OffscreenCanvas(width, height);
+    canvas = createWorkCanvas(width, height);
     ctx = canvas.getContext('2d');
   }
 
@@ -152,14 +174,8 @@ async function convertWebCodecs(file, onProgress) {
     error: (e) => { encoderError = e; }
   });
 
-  const bitrate = Math.min(6_000_000, Math.max(800_000, Math.round(width * height * 4)));
-  encoder.configure({
-    codec: 'avc1.42001f',
-    width,
-    height,
-    bitrate,
-    framerate: 30
-  });
+  const encoderConfig = await negotiateH264Config(width, height);
+  encoder.configure(encoderConfig);
 
   let curTimestamp = 0;
   for (let i = 0; i < frameCount; i++) {
@@ -190,48 +206,106 @@ async function convertWebCodecs(file, onProgress) {
   return new Blob([muxer.target.buffer], { type: 'video/mp4' });
 }
 
-// Tier 2: Resilient Lazy-loaded FFmpeg WASM Fallback
-async function convertFFmpeg(file, onProgress, onStatus) {
-  if (!ffmpegInstance) {
-    onStatus('Loading fallback WASM engine (~30 MB, one-time)...');
-    ffmpegInstance = new FFmpegWASM.FFmpeg();
-    const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-    const ffBase = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-    await ffmpegInstance.load({
-      coreURL: await FFmpegUtil.toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await FFmpegUtil.toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await FFmpegUtil.toBlobURL(`${ffBase}/814.ffmpeg.js`, 'text/javascript'),
+// Tier 2: Universal Fallback Engine (omggif + VideoEncoder or MediaRecorder)
+async function convertUniversal(buffer, onProgress) {
+  const reader = new omggif.GifReader(new Uint8Array(buffer));
+  const srcW = reader.width;
+  const srcH = reader.height;
+  const width = srcW - (srcW % 2);
+  const height = srcH - (srcH % 2);
+  const frameCount = reader.numFrames();
+  if (frameCount <= 0) throw new Error('No frames in GIF.');
+
+  const mainCanvas = createWorkCanvas(width, height);
+  const mainCtx = mainCanvas.getContext('2d');
+  const frameCanvas = createWorkCanvas(srcW, srcH);
+  const frameCtx = frameCanvas.getContext('2d');
+  const pixelBuffer = new Uint8Array(srcW * srcH * 4);
+
+  // Path A: Hardware VideoEncoder with omggif frames
+  if ('VideoEncoder' in window && typeof Mp4Muxer !== 'undefined') {
+    const muxer = new Mp4Muxer.Muxer({
+      target: new Mp4Muxer.ArrayBufferTarget(),
+      video: { codec: 'avc', width, height },
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset'
     });
+
+    let encoderErr = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: e => { encoderErr = e; }
+    });
+
+    const encoderConfig = await negotiateH264Config(width, height);
+    encoder.configure(encoderConfig);
+
+    let curTimestamp = 0;
+    for (let i = 0; i < frameCount; i++) {
+      if (encoderErr) throw encoderErr;
+      const info = reader.frameInfo(i);
+      const duration = (info.delay && info.delay > 0 ? info.delay : 10) * 10000;
+
+      reader.decodeAndBlitFrameRGBA(i, pixelBuffer);
+      const imgData = new ImageData(new Uint8ClampedArray(pixelBuffer.buffer), srcW, srcH);
+      frameCtx.putImageData(imgData, 0, 0);
+
+      mainCtx.clearRect(0, 0, width, height);
+      mainCtx.drawImage(frameCanvas, 0, 0, width, height);
+
+      const frame = new VideoFrame(mainCanvas, { timestamp: curTimestamp, duration });
+      encoder.encode(frame, { keyFrame: i % 30 === 0 });
+      frame.close();
+
+      curTimestamp += duration;
+      onProgress((i + 1) / frameCount);
+    }
+
+    await encoder.flush();
+    encoder.close();
+    muxer.finalize();
+    return new Blob([muxer.target.buffer], { type: 'video/mp4' });
   }
 
-  const pHandler = ({ progress }) => onProgress(Math.min(1, Math.max(0, progress)));
-  ffmpegInstance.on('progress', pHandler);
+  // Path B: Zero-library MediaRecorder fallback (for legacy browsers)
+  return new Promise((resolve, reject) => {
+    let mimeType = 'video/mp4';
+    if (!MediaRecorder.isTypeSupported('video/mp4')) {
+      mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    }
 
-  const uid = Math.random().toString(36).slice(2, 8);
-  const inName = `in_${uid}.gif`, outName = `out_${uid}.mp4`;
+    const stream = mainCanvas.captureStream(30);
+    const rec = new MediaRecorder(stream, { mimeType });
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    rec.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+    rec.onerror = e => reject(e.error || new Error('MediaRecorder recording failed'));
 
-  try {
-    await ffmpegInstance.writeFile(inName, await FFmpegUtil.fetchFile(file));
-    await ffmpegInstance.exec([
-      '-i', inName,
-      '-movflags', 'faststart',
-      '-pix_fmt', 'yuv420p',
-      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '22',
-      outName
-    ]);
-    const outData = await ffmpegInstance.readFile(outName);
-    return new Blob([outData.buffer], { type: 'video/mp4' });
-  } finally {
-    ffmpegInstance.off('progress', pHandler);
-    try { await ffmpegInstance.deleteFile(inName); } catch (_) {}
-    try { await ffmpegInstance.deleteFile(outName); } catch (_) {}
-  }
+    rec.start();
+    let i = 0;
+    function step() {
+      if (i >= frameCount) { rec.stop(); return; }
+      reader.decodeAndBlitFrameRGBA(i, pixelBuffer);
+      const imgData = new ImageData(new Uint8ClampedArray(pixelBuffer.buffer), srcW, srcH);
+      frameCtx.putImageData(imgData, 0, 0);
+      mainCtx.clearRect(0, 0, width, height);
+      mainCtx.drawImage(frameCanvas, 0, 0, width, height);
+      onProgress((i + 1) / frameCount);
+      i++;
+      setTimeout(step, 33);
+    }
+    step();
+  });
 }
 
-// Conversion Controller & Per-item Lifecycle
+// 12-Second Watchdog Wrapper
+function withWatchdog(promise, ms = 12000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Hardware encoder watchdog timeout.')), ms))
+  ]);
+}
+
 async function processConversion(file) {
   const item = document.createElement('div');
   item.className = 'item';
@@ -241,7 +315,7 @@ async function processConversion(file) {
     <img src="${thumbUrl}" alt="preview">
     <div>
       <div class="name"></div>
-      <div class="meta"><span>${kb(file.size)}</span> · <span class="state">Validating...</span></div>
+      <div class="meta"><span>${kb(file.size)}</span> · <span class="state">Validating…</span></div>
       <div class="bar"><i></i></div>
     </div>
     <div class="act"></div>
@@ -258,23 +332,25 @@ async function processConversion(file) {
 
   try {
     const { width, height } = await validateGif(file);
-    setMeta(`Converting ${width}×${height}...`);
+    setMeta(`Converting ${width}×${height} (GPU)…`);
 
+    const buffer = await file.arrayBuffer();
     let blob = null;
     let engine = 'GPU';
 
     const canWebCodecs = ('ImageDecoder' in window) && ('VideoEncoder' in window) && (typeof Mp4Muxer !== 'undefined');
+
     if (canWebCodecs) {
       try {
-        blob = await convertWebCodecs(file, setProgress);
+        blob = await withWatchdog(convertWebCodecs(buffer, setProgress));
       } catch (err) {
-        console.warn('WebCodecs failed, switching to WASM fallback:', err);
-        engine = 'WASM Fallback';
-        blob = await convertFFmpeg(file, setProgress, setMeta);
+        console.warn('Tier 1 failed, engaging Tier 2 fallback:', err);
+        engine = 'Universal Fallback';
+        blob = await withWatchdog(convertUniversal(buffer, setProgress));
       }
     } else {
-      engine = 'WASM Fallback';
-      blob = await convertFFmpeg(file, setProgress, setMeta);
+      engine = 'Universal Fallback';
+      blob = await withWatchdog(convertUniversal(buffer, setProgress));
     }
 
     setProgress(1);
@@ -293,7 +369,8 @@ async function processConversion(file) {
     item.querySelector('img').replaceWith(v);
     releaseUrl(thumbUrl);
 
-    const outName = file.name.replace(/\.gif$/i, '') + '.mp4';
+    const outExt = blob.type.includes('webm') ? '.webm' : '.mp4';
+    const outName = file.name.replace(/\.gif$/i, '') + outExt;
     completedItems.push({ name: outName, url: mp4Url });
     updateBatchUI();
 
@@ -308,7 +385,7 @@ async function processConversion(file) {
     copyBtn.textContent = 'Copy';
     copyBtn.onclick = async () => {
       try {
-        if (navigator.clipboard && window.ClipboardItem) {
+        if (navigator.clipboard && window.ClipboardItem && blob.type === 'video/mp4') {
           await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
           copyBtn.textContent = 'Copied!';
         } else {
@@ -322,11 +399,11 @@ async function processConversion(file) {
     };
 
     act.append(dlBtn, copyBtn);
-    status.textContent = 'Done. Ready for next file.';
+    status.textContent = 'Done. Drop more GIFs.';
   } catch (err) {
     console.error(err);
     state.innerHTML = `<span class="err">${err.message || 'Conversion failed'}</span>`;
-    status.textContent = 'One or more tasks encountered an error.';
+    status.textContent = 'Error processing file.';
   }
 }
 
