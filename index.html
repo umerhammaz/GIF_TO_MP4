@@ -5,80 +5,369 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>GIF → MP4</title>
 <style>
-  :root{--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--mid:#6b6b6b;--text:#eaeaea;--white:#fff}
+  :root{--bg:#0a0a0a;--panel:#141414;--line:#262626;--mid:#737373;--text:#e5e5e5;--white:#fff;--green:#22c55e;--green-bg:#14532d40;--red:#ef4444}
   *{box-sizing:border-box;margin:0}
   body{background:var(--bg);color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;
     min-height:100vh;display:grid;place-items:center;padding:24px}
-  main{width:min(720px,100%);justify-self:center}
+  main{width:min(760px,100%);justify-self:center}
   h1{font-size:1.6rem;letter-spacing:.2em;text-transform:uppercase;margin-bottom:6px}
-  .sub{color:var(--mid);font-size:.85rem;margin-bottom:24px}
-  #drop{display:block;width:100%;border:2px dashed var(--mid);border-radius:14px;background:var(--panel);padding:56px 20px;
-    text-align:center;cursor:pointer;transition:.2s}
-  #drop:hover,#drop.over{border-color:var(--white);background:#1c1c1c;transform:scale(1.01)}
-  #drop b{display:block;font-size:1.1rem;margin-bottom:6px}
+  .sub{color:var(--mid);font-size:.85rem;margin-bottom:20px}
+  #drop{display:block;width:100%;border:2px dashed var(--line);border-radius:14px;background:var(--panel);padding:46px 20px;
+    text-align:center;cursor:pointer;transition:.15s ease}
+  #drop:hover,#drop.over{border-color:var(--white);background:#1a1a1a}
+  #drop b{display:block;font-size:1.05rem;margin-bottom:6px}
   #drop span{color:var(--mid);font-size:.8rem}
   input[type=file]{display:none}
-  #list{margin-top:20px;display:grid;gap:12px}
+  #batch-bar{display:none;margin-top:16px;padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    justify-content:space-between;align-items:center}
+  .batch-actions{display:flex;gap:8px}
+  #list{margin-top:16px;display:grid;gap:12px}
   .item{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
     display:grid;grid-template-columns:84px 1fr auto;gap:14px;align-items:center}
   .item img,.item video{width:84px;height:84px;object-fit:cover;border-radius:8px;filter:grayscale(1);background:#000}
   .name{font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .meta{color:var(--mid);font-size:.75rem;margin:4px 0 8px}
+  .meta{color:var(--mid);font-size:.75rem;margin:5px 0 8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .badge{background:var(--green-bg);color:var(--green);font-size:.7rem;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid var(--green)}
+  .engine{background:#262626;color:#a3a3a3;font-size:.68rem;padding:2px 5px;border-radius:3px}
+  .err{color:var(--red)}
   .bar{height:4px;background:var(--line);border-radius:4px;overflow:hidden}
-  .bar i{display:block;height:100%;width:0;background:var(--white);transition:width .2s}
-  a.btn,button{background:var(--white);color:#000;border:0;border-radius:8px;padding:9px 14px;
-    font:inherit;font-size:.8rem;font-weight:700;text-decoration:none;cursor:pointer}
-  a.btn:hover,button:hover{background:#bbb}
-  #status{margin-top:16px;color:var(--mid);font-size:.8rem;text-align:center;min-height:1em}
+  .bar i{display:block;height:100%;width:0;background:var(--white);transition:width .15s}
+  .act{display:flex;gap:8px;align-items:center}
+  a.btn,button.btn{background:var(--white);color:#000;border:0;border-radius:8px;padding:8px 12px;
+    font:inherit;font-size:.8rem;font-weight:700;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center}
+  a.btn:hover,button.btn:hover{background:#d4d4d4}
+  button.sec{background:transparent;color:var(--mid);border:1px solid var(--line);padding:7px 10px}
+  button.sec:hover{color:var(--text);border-color:var(--mid);background:transparent}
+  #status{margin-top:16px;color:var(--mid);font-size:.8rem;text-align:center;min-height:1.2em}
 </style>
 </head>
 <body>
 <main>
   <h1>GIF → MP4</h1>
-  <p class="sub">Instant. Private. Converted in your browser.</p>
+  <p class="sub">Instant hardware conversion. Zero server uploads. Paste (Ctrl+V) or Drop.</p>
 
   <label id="drop">
-    <b>Drop GIFs here</b>
-    <span>or click to browse (multiple files supported)</span>
+    <b>Drop GIFs here or Paste (Ctrl+V)</b>
+    <span>Multi-file batch supported · Micro-payload engine</span>
     <input id="file" type="file" accept="image/gif" multiple />
   </label>
 
+  <div id="batch-bar">
+    <span id="batch-count" style="font-size:.85rem;color:var(--mid)">0 files converted</span>
+    <div class="batch-actions">
+      <button class="btn" id="btn-download-all">Download All</button>
+      <button class="btn sec" id="btn-clear-all">Clear</button>
+    </div>
+  </div>
+
   <div id="list"></div>
-  <p id="status">Loading converter engine… (first load downloads ~30 MB, then it is cached)</p>
+  <p id="status">Ready. Drop GIFs or paste from clipboard.</p>
 </main>
 
+<!-- Lightweight Native Muxer (~15 KB) -->
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.4/build/mp4-muxer.min.js"></script>
+<!-- FFmpeg UMD wrappers (~20 KB JS, WASM binaries loaded strictly on fallback) -->
 <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
 <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+
 <script>
-const { FFmpeg } = FFmpegWASM;
-const { toBlobURL, fetchFile } = FFmpegUtil;
 const $ = s => document.querySelector(s);
 const drop = $('#drop'), input = $('#file'), list = $('#list'), status = $('#status');
+const batchBar = $('#batch-bar'), batchCount = $('#batch-count');
+const btnDownloadAll = $('#btn-download-all'), btnClearAll = $('#btn-clear-all');
 
-const ffmpeg = new FFmpeg();
-let ready = false, queue = Promise.resolve(), currentBar = null;
+const activeUrls = new Set();
+const completedItems = [];
+let queue = Promise.resolve();
+let ffmpegInstance = null;
 
-ffmpeg.on('progress', ({ progress }) => {
-  if (currentBar) currentBar.style.width = Math.min(100, Math.max(0, progress * 100)) + '%';
-});
+const kb = n => (n / 1024).toFixed(n > 1048576 ? 0 : 1) + ' KB';
 
-(async function init() {
-  try {
+function createTrackedUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  activeUrls.add(url);
+  return url;
+}
+
+function releaseUrl(url) {
+  if (url && activeUrls.has(url)) {
+    URL.revokeObjectURL(url);
+    activeUrls.delete(url);
+  }
+}
+
+// Pre-flight Gatekeeper: Validates GIF binary & blocks pixel bombs
+async function validateGif(file) {
+  if (file.size < 16) throw new Error('File too small to be a valid GIF.');
+  const slice = await file.slice(0, 16).arrayBuffer();
+  const bytes = new Uint8Array(slice);
+  const sig = String.fromCharCode(...bytes.subarray(0, 6));
+  if (sig !== 'GIF87a' && sig !== 'GIF89a') {
+    throw new Error(`Invalid format (${sig || 'unknown'}). Only GIF supported.`);
+  }
+  const width = bytes[6] | (bytes[7] << 8);
+  const height = bytes[8] | (bytes[9] << 8);
+  if (width === 0 || height === 0) throw new Error('Invalid dimensions (0x0).');
+  if (width > 4096 || height > 4096) {
+    throw new Error(`Pixel-bomb protection: ${width}x${height} exceeds 4096px limit.`);
+  }
+  return { width, height };
+}
+
+// Tier 1: Hardware-Accelerated WebCodecs Engine
+async function convertWebCodecs(file, onProgress) {
+  const buffer = await file.arrayBuffer();
+  const decoder = new ImageDecoder({ data: buffer, type: 'image/gif' });
+  await decoder.tracks.ready;
+  const track = decoder.tracks.selectedTrack;
+  const frameCount = track.frameCount;
+  if (!frameCount || frameCount <= 0) throw new Error('No frames found in GIF');
+
+  const probe = await decoder.decode({ frameIndex: 0 });
+  const srcW = probe.image.displayWidth;
+  const srcH = probe.image.displayHeight;
+  probe.image.close();
+
+  // H.264 requires dimensions divisible by 2
+  const width = srcW - (srcW % 2);
+  const height = srcH - (srcH % 2);
+  const needsScale = (width !== srcW || height !== srcH);
+
+  let canvas = null, ctx = null;
+  if (needsScale) {
+    canvas = new OffscreenCanvas(width, height);
+    ctx = canvas.getContext('2d');
+  }
+
+  const muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: { codec: 'avc', width, height },
+    fastStart: 'in-memory',
+    firstTimestampBehavior: 'offset'
+  });
+
+  let encoderError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encoderError = e; }
+  });
+
+  const bitrate = Math.min(6_000_000, Math.max(800_000, Math.round(width * height * 4)));
+  encoder.configure({
+    codec: 'avc1.42001f',
+    width,
+    height,
+    bitrate,
+    framerate: 30
+  });
+
+  let curTimestamp = 0;
+  for (let i = 0; i < frameCount; i++) {
+    if (encoderError) throw encoderError;
+    const { image } = await decoder.decode({ frameIndex: i });
+    const duration = image.duration || 100000;
+    let targetFrame = image;
+
+    if (needsScale) {
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(image, 0, 0, width, height);
+      targetFrame = new VideoFrame(canvas, { timestamp: curTimestamp, duration });
+      image.close();
+    } else if (image.timestamp === null || image.timestamp === undefined) {
+      targetFrame = new VideoFrame(image, { timestamp: curTimestamp, duration });
+      image.close();
+    }
+
+    encoder.encode(targetFrame, { keyFrame: i % 30 === 0 });
+    targetFrame.close();
+    curTimestamp += duration;
+    onProgress((i + 1) / frameCount);
+  }
+
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
+  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+}
+
+// Tier 2: Resilient Lazy-loaded FFmpeg WASM Fallback
+async function convertFFmpeg(file, onProgress, onStatus) {
+  if (!ffmpegInstance) {
+    onStatus('Loading fallback WASM engine (~30 MB, one-time)...');
+    ffmpegInstance = new FFmpegWASM.FFmpeg();
     const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
     const ffBase = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await toBlobURL(`${ffBase}/814.ffmpeg.js`, 'text/javascript'),
+    await ffmpegInstance.load({
+      coreURL: await FFmpegUtil.toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await FFmpegUtil.toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+      classWorkerURL: await FFmpegUtil.toBlobURL(`${ffBase}/814.ffmpeg.js`, 'text/javascript'),
     });
-    ready = true;
-    status.textContent = 'Ready. Drop a GIF.';
-  } catch (e) {
-    console.error(e);
-    status.textContent = 'Failed to load engine: ' + (e && e.message ? e.message : e) +
-      ' (serve over http://localhost or https, not file://)';
   }
-})();
+
+  const pHandler = ({ progress }) => onProgress(Math.min(1, Math.max(0, progress)));
+  ffmpegInstance.on('progress', pHandler);
+
+  const uid = Math.random().toString(36).slice(2, 8);
+  const inName = `in_${uid}.gif`, outName = `out_${uid}.mp4`;
+
+  try {
+    await ffmpegInstance.writeFile(inName, await FFmpegUtil.fetchFile(file));
+    await ffmpegInstance.exec([
+      '-i', inName,
+      '-movflags', 'faststart',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-crf', '22',
+      outName
+    ]);
+    const outData = await ffmpegInstance.readFile(outName);
+    return new Blob([outData.buffer], { type: 'video/mp4' });
+  } finally {
+    ffmpegInstance.off('progress', pHandler);
+    try { await ffmpegInstance.deleteFile(inName); } catch (_) {}
+    try { await ffmpegInstance.deleteFile(outName); } catch (_) {}
+  }
+}
+
+// Conversion Controller & Per-item Lifecycle
+async function processConversion(file) {
+  const item = document.createElement('div');
+  item.className = 'item';
+  const thumbUrl = createTrackedUrl(file);
+
+  item.innerHTML = `
+    <img src="${thumbUrl}" alt="preview">
+    <div>
+      <div class="name"></div>
+      <div class="meta"><span>${kb(file.size)}</span> · <span class="state">Validating...</span></div>
+      <div class="bar"><i></i></div>
+    </div>
+    <div class="act"></div>
+  `;
+  item.querySelector('.name').textContent = file.name;
+  list.prepend(item);
+
+  const bar = item.querySelector('.bar i');
+  const state = item.querySelector('.state');
+  const act = item.querySelector('.act');
+
+  const setProgress = p => { bar.style.width = `${Math.min(100, Math.max(0, p * 100))}%`; };
+  const setMeta = txt => { state.textContent = txt; };
+
+  try {
+    const { width, height } = await validateGif(file);
+    setMeta(`Converting ${width}×${height}...`);
+
+    let blob = null;
+    let engine = 'GPU';
+
+    const canWebCodecs = ('ImageDecoder' in window) && ('VideoEncoder' in window) && (typeof Mp4Muxer !== 'undefined');
+    if (canWebCodecs) {
+      try {
+        blob = await convertWebCodecs(file, setProgress);
+      } catch (err) {
+        console.warn('WebCodecs failed, switching to WASM fallback:', err);
+        engine = 'WASM Fallback';
+        blob = await convertFFmpeg(file, setProgress, setMeta);
+      }
+    } else {
+      engine = 'WASM Fallback';
+      blob = await convertFFmpeg(file, setProgress, setMeta);
+    }
+
+    setProgress(1);
+    const mp4Url = createTrackedUrl(blob);
+    const pct = Math.round((1 - blob.size / file.size) * 100);
+    const badgeText = pct > 0 ? `-${pct}%` : `+${Math.abs(pct)}%`;
+
+    state.innerHTML = `
+      ${kb(file.size)} → ${kb(blob.size)}
+      <span class="badge">${badgeText}</span>
+      <span class="engine">${engine}</span>
+    `;
+
+    const v = document.createElement('video');
+    v.src = mp4Url; v.muted = v.loop = v.autoplay = v.playsInline = true;
+    item.querySelector('img').replaceWith(v);
+    releaseUrl(thumbUrl);
+
+    const outName = file.name.replace(/\.gif$/i, '') + '.mp4';
+    completedItems.push({ name: outName, url: mp4Url });
+    updateBatchUI();
+
+    const dlBtn = document.createElement('a');
+    dlBtn.className = 'btn';
+    dlBtn.href = mp4Url;
+    dlBtn.download = outName;
+    dlBtn.textContent = 'Download';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn sec';
+    copyBtn.textContent = 'Copy';
+    copyBtn.onclick = async () => {
+      try {
+        if (navigator.clipboard && window.ClipboardItem) {
+          await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+          copyBtn.textContent = 'Copied!';
+        } else {
+          await navigator.clipboard.writeText(mp4Url);
+          copyBtn.textContent = 'Link Copied';
+        }
+      } catch (_) {
+        copyBtn.textContent = 'Failed';
+      }
+      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    };
+
+    act.append(dlBtn, copyBtn);
+    status.textContent = 'Done. Ready for next file.';
+  } catch (err) {
+    console.error(err);
+    state.innerHTML = `<span class="err">${err.message || 'Conversion failed'}</span>`;
+    status.textContent = 'One or more tasks encountered an error.';
+  }
+}
+
+function handle(files) {
+  const gifs = [...files].filter(f => f.type === 'image/gif' || /\.gif$/i.test(f.name));
+  if (!gifs.length) {
+    status.textContent = 'No GIF files detected.';
+    return;
+  }
+  gifs.forEach(f => {
+    queue = queue.then(() => processConversion(f));
+  });
+}
+
+function updateBatchUI() {
+  if (completedItems.length > 1) {
+    batchBar.style.display = 'flex';
+    batchCount.textContent = `${completedItems.length} videos converted`;
+  }
+}
+
+btnDownloadAll.addEventListener('click', async () => {
+  for (const item of completedItems) {
+    const a = document.createElement('a');
+    a.href = item.url;
+    a.download = item.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    await new Promise(r => setTimeout(r, 200));
+  }
+});
+
+btnClearAll.addEventListener('click', () => {
+  activeUrls.forEach(url => URL.revokeObjectURL(url));
+  activeUrls.clear();
+  completedItems.length = 0;
+  list.innerHTML = '';
+  batchBar.style.display = 'none';
+  status.textContent = 'Ready. Drop GIFs or paste from clipboard.';
+});
 
 ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
   e.preventDefault(); drop.classList.add('over');
@@ -91,58 +380,22 @@ input.addEventListener('change', () => { handle(input.files); input.value = ''; 
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => e.preventDefault());
 
-function handle(files) {
-  [...files].filter(f => f.type === 'image/gif' || /\.gif$/i.test(f.name))
-    .forEach(f => queue = queue.then(() => convert(f)));
-}
-
-const kb = n => (n / 1024).toFixed(n > 1048576 ? 0 : 1) + ' KB';
-
-async function convert(file) {
-  if (!ready) { status.textContent = 'Engine still loading…'; return; }
-  const item = document.createElement('div');
-  item.className = 'item';
-  const thumb = URL.createObjectURL(file);
-  item.innerHTML = `<img src="${thumb}" alt="">
-    <div><div class="name"></div><div class="meta">${kb(file.size)} · converting…</div>
-    <div class="bar"><i></i></div></div><div class="act"></div>`;
-  item.querySelector('.name').textContent = file.name;
-  list.prepend(item);
-  const bar = item.querySelector('.bar i'), meta = item.querySelector('.meta');
-  currentBar = bar;
-  status.textContent = 'Converting…';
-
-  try {
-    await ffmpeg.writeFile('in.gif', await fetchFile(file));
-    await ffmpeg.exec([
-      '-i', 'in.gif',
-      '-movflags', 'faststart',
-      '-pix_fmt', 'yuv420p',
-      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-      'out.mp4'
-    ]);
-    const data = await ffmpeg.readFile('out.mp4');
-    const blob = new Blob([data.buffer], { type: 'video/mp4' });
-    const url = URL.createObjectURL(blob);
-    bar.style.width = '100%';
-    meta.textContent = `${kb(file.size)} → ${kb(blob.size)} · done`;
-    const a = document.createElement('a');
-    a.className = 'btn'; a.href = url;
-    a.download = file.name.replace(/\.gif$/i, '') + '.mp4';
-    a.textContent = 'Download';
-    item.querySelector('.act').append(a);
-    const v = document.createElement('video');
-    v.src = url; v.muted = v.loop = v.autoplay = v.playsInline = true;
-    item.querySelector('img').replaceWith(v);
-    await ffmpeg.deleteFile('in.gif'); await ffmpeg.deleteFile('out.mp4');
-    status.textContent = 'Done. Drop more.';
-  } catch (err) {
-    console.error(err);
-    meta.textContent = 'Conversion failed';
-    status.textContent = 'Something went wrong. See console.';
+window.addEventListener('paste', e => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file && (file.type === 'image/gif' || /\.gif$/i.test(file.name))) files.push(file);
+    }
   }
-}
+  if (files.length) handle(files);
+});
+
+window.addEventListener('beforeunload', () => {
+  activeUrls.forEach(url => URL.revokeObjectURL(url));
+});
 </script>
 </body>
 </html>
